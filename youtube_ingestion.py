@@ -2,7 +2,6 @@ import os
 from dotenv import load_dotenv
 from youtube_transcript_api import YouTubeTranscriptApi
 from langchain_community.document_loaders import YoutubeLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
 from fastembed import TextEmbedding
 from qdrant_client import QdrantClient, models
@@ -34,12 +33,8 @@ class YouTubeIngestion:
         )
         self.collection_name = collection_name
         
-        # Initialize text splitter
-        self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200,
-            length_function=len,
-        )
+        self.chunk_size = 1000
+        self.chunk_overlap = 200
         
         # Create collection if it doesn't exist
         self._create_collection()
@@ -70,7 +65,7 @@ class YouTubeIngestion:
             video_id (str): YouTube video ID
 
         Returns:
-            str: Combined transcript text
+            list[dict]: Transcript segments with timing
         """
         try:
             # Create API instance and fetch transcript
@@ -80,33 +75,70 @@ class YouTubeIngestion:
             # Convert to raw data (list of dictionaries)
             transcript_list = fetched_transcript.to_raw_data()
             
-            # Combine all transcript segments into one text
-            transcript_text = " ".join([item['text'] for item in transcript_list])
-            
-            print(f"Successfully extracted transcript. Length: {len(transcript_text)} characters")
-            return transcript_text
+            total_chars = sum(len(item.get('text', '')) + 1 for item in transcript_list)
+            print(f"Successfully extracted transcript. Segments: {len(transcript_list)}, Total length: {total_chars} characters")
+            return transcript_list
             
         except Exception as e:
             print(f"Error getting transcript: {e}")
             raise
     
-    def create_chunks(self, text):
+    def create_chunks(self, transcript_segments: List[dict]):
         """
-        Split text into chunks.
+        Split transcript into chunks while preserving start/end times.
         
         Args:
-            text (str): Input text
+            transcript_segments (list[dict]): Items with 'text','start','duration'
             
         Returns:
-            list: List of Document objects
+            list: List of Document objects with timing metadata
         """
-        # Create a Document object
-        doc = Document(page_content=text)
-        
-        # Split the document
-        chunks = self.text_splitter.split_documents([doc])
-        
+        chunks: List[Document] = []
+        n = len(transcript_segments)
+        i = 0
+        target_size = self.chunk_size
+        overlap_chars = self.chunk_overlap
+
+        while i < n:
+            j = i
+            current_chars = 0
+            while j < n and current_chars < target_size:
+                current_chars += len(transcript_segments[j].get('text', '')) + 1
+                j += 1
+
+            if j == i:
+                j = min(i + 1, n)
+
+            segment_slice = transcript_segments[i:j]
+            chunk_text = " ".join(seg.get('text', '') for seg in segment_slice)
+            start_time = float(segment_slice[0].get('start', 0.0))
+            last = segment_slice[-1]
+            end_time = float(last.get('start', 0.0)) + float(last.get('duration', 0.0))
+
+            chunks.append(
+                Document(
+                    page_content=chunk_text,
+                    metadata={
+                        "start_time": start_time,
+                        "end_time": end_time,
+                    },
+                )
+            )
+
+            if j >= n:
+                break
+
+            # compute next i using character overlap backwards from j
+            remaining_overlap = overlap_chars
+            k = j - 1
+            while k > i and remaining_overlap > 0:
+                remaining_overlap -= len(transcript_segments[k].get('text', '')) + 1
+                k -= 1
+            i = max(i, k + 1)
+
         print(f"Created {len(chunks)} chunks")
+        print(chunks[0])
+        print(chunks[0].metadata)
         return chunks
     
     def _create_collection(self):
@@ -226,11 +258,11 @@ class YouTubeIngestion:
         video_id = self.extract_video_id(youtube_url)
         print(f"Video ID: {video_id}")
         
-        # Get transcript
-        transcript = self.get_transcript(video_id)
-        
-        # Create chunks
-        chunks = self.create_chunks(transcript)
+        # Get transcript segments (with timings)
+        transcript_segments = self.get_transcript(video_id)
+
+        # Create chunks with start/end times
+        chunks = self.create_chunks(transcript_segments)
         
         # Create vector store
         num_docs = self.create_vector_store(chunks)
