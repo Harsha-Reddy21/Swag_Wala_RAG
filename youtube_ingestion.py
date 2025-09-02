@@ -26,10 +26,11 @@ class YouTubeIngestion:
         # Initialize embeddings with FastEmbed
         self.model = TextEmbedding(embedding_model)
         
-        # Initialize Qdrant client with cloud configuration
+        # Initialize Qdrant client with cloud configuration (use env if available)
         self.client = QdrantClient(
-            url="https://4fd663f5-7f29-44e3-a3ae-5c8541547802.europe-west3-0.gcp.cloud.qdrant.io:6333",
-            api_key="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.GKTtCzkmi8EUtKz3_EeDthvjyLDkmk0yp1YJCTcs9yQ"
+            url=os.getenv("QDRANT_URL", "https://4fd663f5-7f29-44e3-a3ae-5c8541547802.europe-west3-0.gcp.cloud.qdrant.io:6333"),
+            api_key=os.getenv("QDRANT_API_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.GKTtCzkmi8EUtKz3_EeDthvjyLDkmk0yp1YJCTcs9yQ"),
+            timeout=60.0,
         )
         self.collection_name = collection_name
         
@@ -110,22 +111,30 @@ class YouTubeIngestion:
     
     def _create_collection(self):
         """
-        Create Qdrant collection if it doesn't exist.
+        Create Qdrant collection if it doesn't exist. Idempotent and tolerant to timeouts.
         """
         try:
-            # Check if collection exists
             self.client.get_collection(self.collection_name)
             print(f"Collection '{self.collection_name}' already exists")
-        except Exception:
-            # Create collection with vector configuration
+            return
+        except Exception as e:
+            print(f"get_collection failed ({e}); attempting to create collection...")
+
+        try:
             self.client.create_collection(
                 collection_name=self.collection_name,
                 vectors_config=models.VectorParams(
                     size=768,  # nomic-embed-text-v1 produces 768-dimensional vectors
-                    distance=models.Distance.COSINE
-                )
+                    distance=models.Distance.COSINE,
+                ),
             )
             print(f"Created collection '{self.collection_name}'")
+        except Exception as create_exc:
+            message = str(create_exc).lower()
+            if "already exists" in message or "409" in message or "conflict" in message:
+                print(f"Collection '{self.collection_name}' already exists; proceeding.")
+            else:
+                raise
     
     def create_vector_store(self, chunks):
         """
