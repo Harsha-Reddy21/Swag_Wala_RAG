@@ -38,6 +38,15 @@ class YouTubeIngestion:
         
         # Create collection if it doesn't exist
         self._create_collection()
+
+    def _format_mm_ss(self, seconds: float) -> str:
+        """
+        Convert seconds (float) to mm:ss string.
+        """
+        total_seconds = int(seconds)
+        minutes = total_seconds // 60
+        secs = total_seconds % 60
+        return f"{minutes}:{secs:02d}"
     
     def extract_video_id(self, youtube_url):
         """
@@ -121,6 +130,8 @@ class YouTubeIngestion:
                     metadata={
                         "start_time": start_time,
                         "end_time": end_time,
+                        "start_time_str": self._format_mm_ss(start_time),
+                        "end_time_str": self._format_mm_ss(end_time),
                     },
                 )
             )
