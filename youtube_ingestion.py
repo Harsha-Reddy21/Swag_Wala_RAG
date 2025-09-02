@@ -1,11 +1,11 @@
 import os
+import json
 from dotenv import load_dotenv
 from youtube_transcript_api import YouTubeTranscriptApi
-from langchain_community.document_loaders import YoutubeLoader
 from langchain.schema import Document
 from fastembed import TextEmbedding
 from qdrant_client import QdrantClient, models
-from typing import List
+from typing import List, Dict, Any, Optional
 import uuid
 
 # Load environment variables
@@ -25,10 +25,18 @@ class YouTubeIngestion:
         # Initialize embeddings with FastEmbed
         self.model = TextEmbedding(embedding_model)
         
-        # Initialize Qdrant client with cloud configuration (use env if available)
+        # Initialize Qdrant client using environment variables only
+        qdrant_url_env = os.getenv("QDRANT_URL") or ""
+        qdrant_api_key_env = os.getenv("QDRANT_API_KEY") or ""
+        # Sanitize env values: strip whitespace and trailing commas
+        qdrant_url = qdrant_url_env.strip().rstrip(",")
+        qdrant_api_key = qdrant_api_key_env.strip()
+        if not qdrant_url or not qdrant_api_key:
+            raise RuntimeError("QDRANT_URL and QDRANT_API_KEY must be set in environment variables")
+
         self.client = QdrantClient(
-            url=os.getenv("QDRANT_URL", "https://4fd663f5-7f29-44e3-a3ae-5c8541547802.europe-west3-0.gcp.cloud.qdrant.io:6333"),
-            api_key=os.getenv("QDRANT_API_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.GKTtCzkmi8EUtKz3_EeDthvjyLDkmk0yp1YJCTcs9yQ"),
+            url=qdrant_url,
+            api_key=qdrant_api_key,
             timeout=60.0,
         )
         self.collection_name = collection_name
@@ -128,8 +136,6 @@ class YouTubeIngestion:
                 Document(
                     page_content=chunk_text,
                     metadata={
-                        "start_time": start_time,
-                        "end_time": end_time,
                         "start_time_str": self._format_mm_ss(start_time),
                         "end_time_str": self._format_mm_ss(end_time),
                     },
@@ -179,7 +185,7 @@ class YouTubeIngestion:
             else:
                 raise
     
-    def create_vector_store(self, chunks):
+    def create_vector_store(self, chunks, base_metadata: Optional[Dict[str, Any]] = None):
         """
         Create Qdrant vector store from chunks.
         
@@ -201,13 +207,16 @@ class YouTubeIngestion:
         points = []
         for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
             point_id = str(uuid.uuid4())
+            merged_meta: Dict[str, Any] = dict(base_metadata or {})
+            if getattr(chunk, "metadata", None):
+                merged_meta.update(chunk.metadata)
             points.append(
                 models.PointStruct(
                     id=point_id,
                     vector=embedding.tolist(),
                     payload={
                         "text": chunk.page_content,
-                        "metadata": chunk.metadata
+                        "metadata": merged_meta
                     }
                 )
             )
@@ -280,25 +289,72 @@ class YouTubeIngestion:
         
         print("Ingestion completed successfully!")
         return num_docs
+    def ingest_single_video(self, video: Dict[str, Any]) -> int:
+        """
+        Ingest a single video dict coming from videos.json schema:
+        {
+            "video_id": "...",
+            "video_url": "...",
+            "video_title": "...",
+            "upload_date": "...",
+            "video_duration": "hh:mm:ss"
+        }
+        """
+        video_url_or_id = video.get("video_url") or video.get("video_id")
+        if not video_url_or_id:
+            raise ValueError("Video entry missing 'video_url' or 'video_id'")
+
+        print(f"Starting ingestion for: {video_url_or_id}")
+        video_id = self.extract_video_id(video_url_or_id)
+        print(f"Video ID: {video_id}")
+
+        transcript_segments = self.get_transcript(video_id)
+        chunks = self.create_chunks(transcript_segments)
+
+        base_metadata: Dict[str, Any] = {
+            "video_id": video.get("video_id", video_id),
+            "video_url": video.get("video_url", f"https://www.youtube.com/watch?v={video_id}"),
+            "video_title": video.get("video_title"),
+            "upload_date": video.get("upload_date"),
+            "video_duration": video.get("video_duration"),
+        }
+
+        num_docs = self.create_vector_store(chunks, base_metadata=base_metadata)
+        print("Ingestion completed successfully!")
+        return num_docs
+
+    def ingest_from_videos_json(self, videos_json_path: str) -> int:
+        """
+        Read videos.json and ingest all videos. Returns total chunks stored.
+        """
+        if not os.path.exists(videos_json_path):
+            raise FileNotFoundError(f"{videos_json_path} not found")
+
+        with open(videos_json_path, "r", encoding="utf-8") as f:
+            videos = json.load(f)
+
+        if not isinstance(videos, list):
+            raise ValueError("videos.json must be a list of video objects")
+
+        total = 0
+        for idx, video in enumerate(videos, 1):
+            try:
+                print(f"\n[{idx}/{len(videos)}] Ingesting: {video.get('video_title')} ({video.get('video_url')})")
+                total += self.ingest_single_video(video)
+            except Exception as e:
+                print(f"Failed to ingest video ({video.get('video_url') or video.get('video_id')}): {e}")
+        print(f"\nTotal documents stored across all videos: {total}")
+        return total
 
 
 def main():
     """
-    Example usage of the YouTube ingestion pipeline.
+    Ingest all videos listed in videos.json and run a sample search.
     """
-    # Initialize ingestion pipeline
     ingestion = YouTubeIngestion()
-    
-    # Example video ID from the notebook
-    video_url = "https://www.youtube.com/watch?v=w7sai6uWH3o"  # or full URL: "https://www.youtube.com/watch?v=Gfr50f6ZBvo"
-    
-    # Ingest the video
-    num_docs = ingestion.ingest_youtube_video(youtube_url=video_url)
-    
-    print(f"\nVector store info:")
-    print(f"Number of documents: {num_docs}")
-    
-    # Example: Test similarity search
+    videos_json_path = os.getenv("VIDEOS_JSON_PATH", "videos.json")
+    ingestion.ingest_from_videos_json(videos_json_path)
+
     query = "What was mentioned in Bhagavth Gita"
     results = ingestion.similarity_search(query, k=3)
     print(f"\nSimilarity search results for '{query}':")
