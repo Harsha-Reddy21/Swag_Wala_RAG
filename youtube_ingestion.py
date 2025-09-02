@@ -1,5 +1,6 @@
 import os
 import json
+import time
 from dotenv import load_dotenv
 from youtube_transcript_api import YouTubeTranscriptApi
 from langchain.schema import Document
@@ -323,9 +324,10 @@ class YouTubeIngestion:
         print("Ingestion completed successfully!")
         return num_docs
 
-    def ingest_from_videos_json(self, videos_json_path: str) -> int:
+    def ingest_from_videos_json(self, videos_json_path: str, start_index: int = 1, sleep_every: int = 20, sleep_seconds: int = 180) -> int:
         """
-        Read videos.json and ingest all videos. Returns total chunks stored.
+        Read videos.json and ingest all videos starting from start_index (1-based).
+        Sleeps for sleep_seconds after every 'sleep_every' processed videos. Returns total chunks stored.
         """
         if not os.path.exists(videos_json_path):
             raise FileNotFoundError(f"{videos_json_path} not found")
@@ -337,10 +339,22 @@ class YouTubeIngestion:
             raise ValueError("videos.json must be a list of video objects")
 
         total = 0
-        for idx, video in enumerate(videos, 1):
+        total_videos = len(videos)
+        # Clamp start_index to valid range (1-based incoming)
+        start_index = max(1, min(start_index, total_videos))
+        start_zero_based = start_index - 1
+
+        processed_counter = 0
+        for idx in range(start_zero_based, total_videos):
+            video = videos[idx]
+            human_idx = idx + 1
             try:
-                print(f"\n[{idx}/{len(videos)}] Ingesting: {video.get('video_title')} ({video.get('video_url')})")
+                print(f"\n[{human_idx}/{total_videos}] Ingesting: {video.get('video_title')} ({video.get('video_url')})")
                 total += self.ingest_single_video(video)
+                processed_counter += 1
+                if processed_counter % sleep_every == 0 and human_idx < total_videos:
+                    print(f"Processed {processed_counter} videos; sleeping for {sleep_seconds} seconds to respect rate limits...")
+                    time.sleep(sleep_seconds)
             except Exception as e:
                 print(f"Failed to ingest video ({video.get('video_url') or video.get('video_id')}): {e}")
         print(f"\nTotal documents stored across all videos: {total}")
@@ -349,11 +363,21 @@ class YouTubeIngestion:
 
 def main():
     """
-    Ingest all videos listed in videos.json and run a sample search.
+    Ingest videos listed in videos.json starting from an optional index, and run a sample search.
     """
     ingestion = YouTubeIngestion()
     videos_json_path = os.getenv("VIDEOS_JSON_PATH", "videos.json")
-    ingestion.ingest_from_videos_json(videos_json_path)
+    # Allow resuming via env var: VIDEOS_START_INDEX (1-based). Example: 24 means start at the 24th entry.
+    start_index_str = os.getenv("VIDEOS_START_INDEX", "1").strip()
+    try:
+        start_index = int(start_index_str)
+    except ValueError:
+        start_index = 1
+    # Sleep tuning via env if needed
+    sleep_every = int(os.getenv("VIDEOS_SLEEP_EVERY", "20").strip())
+    sleep_seconds = int(os.getenv("VIDEOS_SLEEP_SECONDS", "180").strip())
+
+    ingestion.ingest_from_videos_json(videos_json_path, start_index=start_index, sleep_every=sleep_every, sleep_seconds=sleep_seconds)
 
     query = "What was mentioned in Bhagavth Gita"
     results = ingestion.similarity_search(query, k=3)
