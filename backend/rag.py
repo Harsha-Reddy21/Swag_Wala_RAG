@@ -40,7 +40,7 @@ def format_context(docs: List):
     return "\n\n".join(parts)
 
 
-def answer(query: str, k: int = 5) -> str:
+async def process_query(query: str, k: int = 5) -> str:
     docs = retrieve(query, k=k)
     context = format_context(docs)
 
@@ -72,7 +72,7 @@ if __name__ == "__main__":
     
     # Test with a specific query first
     test_query = "What is Product Management?"
-    result = answer(test_query, k=5)
+    result = process_query(test_query, k=5)
     print(result)
   
    

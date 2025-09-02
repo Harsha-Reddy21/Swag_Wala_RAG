@@ -8,3 +8,9 @@ google-api-python-client
 pytz
 isodate
 langchain-openai
+fastapi
+uvicorn
+sqlalchemy
+psycopg2-binary
+pydantic
+alembic
