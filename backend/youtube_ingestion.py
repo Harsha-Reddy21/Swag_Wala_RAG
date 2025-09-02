@@ -252,6 +252,7 @@ class YouTubeIngestion:
             limit=k
         )
         
+        
         # Convert results to Document-like format
         results = []
         for result in search_results:
@@ -260,6 +261,7 @@ class YouTubeIngestion:
                 metadata=result.payload["metadata"]
             )
             results.append(doc)
+        
         
         return results
     

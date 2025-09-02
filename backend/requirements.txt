@@ -7,3 +7,4 @@ fastembed
 google-api-python-client
 pytz
 isodate
+langchain-openai
