@@ -1,0 +1,6 @@
+youtube-transcript-api
+langchain-community
+python-dotenv
+langchain
+qdrant-client
+fastembed
